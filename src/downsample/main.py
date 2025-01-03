@@ -68,7 +68,7 @@ class Downsampler:
         except FileNotFoundError:
             return "", 0
 
-    def list_raw_files(self):
+    def _list_raw_files(self):
         """
         Fetch the list of raw files to be processed.
 
@@ -126,7 +126,7 @@ class Downsampler:
         data = segy_data["data"]
         return data
 
-    def downsample_raw_data(self):
+    def _downsample_raw_data(self):
         """
         Downsample the raw data array.
 
@@ -237,7 +237,7 @@ class Downsampler:
         end_time_overlap = data_start_ts + CHUNK_SIZE + 2 * CHUNK_OVERLAP
         return start_time_overlap, end_time_overlap
 
-    def load_chuck_raw_data(self, raw_files_list):
+    def _load_chuck_raw_data(self, raw_files_list):
         """
         Load raw data from a list of raw files and process it into a contiguous array.
 
@@ -324,7 +324,7 @@ class Downsampler:
             return -1, -1
         return start_time_overlap, end_time_overlap
     
-    def write_downsampled_output(self, down_data, start_time_overlap, end_time_overlap):
+    def _write_downsampled_output(self, down_data, start_time_overlap, end_time_overlap):
         """
         Write the downsampled data to an HDF5 file and store it in a directory structure based on the date.
 
@@ -355,7 +355,7 @@ class Downsampler:
             f.attrs["_downsampler_last_updated"] = self.last_updated
         log.info(f"Downsampled chunk starting at {start_time} written to {file_path}")
         
-    def update_last_file_status(self):
+    def _update_last_file_status(self):
         """
         Update the status of the last processed file.
         """
@@ -369,14 +369,14 @@ class Downsampler:
         Run the downsampling process.
         """
         log.info("Starting downsampling process")
-        raw_files_list = self.list_raw_files()
+        raw_files_list = self._list_raw_files()
         while raw_files_list:
-            start_time_overlap, end_time_overlap = self.load_chuck_raw_data(raw_files_list)
+            start_time_overlap, end_time_overlap = self._load_chuck_raw_data(raw_files_list)
             if start_time_overlap == -1 and end_time_overlap == -1:
                 log.warning(f"Data is missing")
                 continue
-            down_data = self.downsample_raw_data()
+            down_data = self._downsample_raw_data()
             self._validate_downsampled_data(down_data)
-            self.write_downsampled_output(down_data, start_time_overlap, end_time_overlap)
-            self.update_last_file_status()
+            self._write_downsampled_output(down_data, start_time_overlap, end_time_overlap)
+            self._update_last_file_status()
         log.info("Downsampling process completed")
