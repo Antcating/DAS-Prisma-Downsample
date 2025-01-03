@@ -22,7 +22,9 @@ RAW_SPS = 1500 # samples per second
 NUM_CHANNELS = 3746
 
 class Downsampler:
-    def __init__(self):
+    def __init__(self, num_threads=4):
+        self.num_threads = num_threads
+
         self.raw_data_array = np.zeros((NUM_CHANNELS, RAW_SPS * CHUNK_SIZE + 2 * RAW_SPS * CHUNK_OVERLAP))
         self.last_processed_file, self.last_file_offset = self._read_last_file_status()
 
@@ -178,8 +180,8 @@ class Downsampler:
                 return decimate(arr, factor, axis=-1)
             else:
                 arr = arr.reshape(arr.shape[0], int((CHUNK_SIZE + (2 * CHUNK_OVERLAP)) * RAW_SPS / factors[0]), factors[0])
-                arr = multithreaded_mean(arr, axis=2)
-                return decimate(arr, factors[1], axis=1)
+                arr = multithreaded_mean(arr, axis=2, num_thread=self.num_threads)
+                return decimate(arr, factors[1], axis=1, num_thread=self.num_threads)
         elif type == "mean":
             if factors != []:
                 raise NotImplementedError("Mean downsampling does not support multiple factors")
