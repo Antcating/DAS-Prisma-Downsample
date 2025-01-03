@@ -19,6 +19,9 @@ CHUNK_SIZE = int(config.get("DOWNSAMPLING", "CHUNK_SIZE"))
 CHUNK_OVERLAP = int(config.get("DOWNSAMPLING", "CHUNK_OVERLAP"))
 SPS = int(config.get("DOWNSAMPLING", "SPS"))
 DX = float(config.get("DOWNSAMPLING", "DX"))
+NUM_THREADS = int(config.get("DOWNSAMPLING", "NUM_THREADS"))
+FACTORS_TIME = [int(x) for x in config.get("DOWNSAMPLING", "FACTORS_TIME").split(",")]
+FACTORS_SPACE = [int(x) for x in config.get("DOWNSAMPLING", "FACTORS_SPACE").split(",")]
 
 # Logging parameters
 LOG_LEVEL = config.get("LOGGING", "LOG_LEVEL")

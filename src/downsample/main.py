@@ -19,10 +19,13 @@ from config import (
     RAW_SPS,
     RAW_DX,
     NUM_CHANNELS,
+    FACTORS_TIME,
+    FACTORS_SPACE,
+    NUM_THREADS,
 )
 
 class Downsampler:
-    def __init__(self, num_threads=4):
+    def __init__(self, num_threads=NUM_THREADS):
         self.num_threads = num_threads
 
         self.raw_data_array = np.zeros((NUM_CHANNELS, int(RAW_SPS * CHUNK_SIZE + 2 * RAW_SPS * CHUNK_OVERLAP)))
@@ -135,7 +138,7 @@ class Downsampler:
         numpy.ndarray
             The downsampled data.
         """
-        down_data = self._downsample_array(self.raw_data_array, factors=[3, 5], type="scipy")
+        down_data = self._downsample_array(self.raw_data_array, factors=FACTORS_TIME, type="scipy")
         down_data = down_data[:, CHUNK_OVERLAP * SPS : -CHUNK_OVERLAP * SPS]
         return down_data
 
@@ -353,7 +356,7 @@ class Downsampler:
 
             f.attrs["_downsampler_version"] = self.version
             f.attrs["_downsampler_last_updated"] = self.last_updated
-        log.info(f"Downsampled chunk starting at {start_time} written to {file_path}")
+        log.info(f"Downsampled chunk starting at {start_time} written to {file_name}")
         
     def _update_last_file_status(self):
         """
