@@ -3,7 +3,8 @@ from datetime import datetime, timedelta
 
 import pytz
 import numpy as np
-from scipy.signal import decimate
+# from scipy.signal import decimate
+from utils.multithread import decimate, multithreaded_mean
 
 import h5py
 
@@ -19,30 +20,6 @@ SPS = 100 # samples per second
 DX = 9.8 # meters
 RAW_SPS = 1500 # samples per second
 NUM_CHANNELS = 3746
-
-def multithreaded_mean(arr, num_thread):
-    """
-    Compute the mean of an array in a multithreaded manner.
-
-    Parameters:
-    -----------
-    arr : numpy.ndarray
-        The input array to compute the mean.
-    num_thread : int
-        The number of threads to use.
-
-    Returns:
-    --------
-    numpy.ndarray
-        The mean of the input array.
-    """
-    def mean_chunk(chunk):
-        return np.mean(chunk, axis=-1, dtype=np.float32)
-    with ThreadPoolExecutor(max_workers=num_thread) as executor:
-        chunks = np.array_split(arr, num_thread, axis=1)
-        results = executor.map(mean_chunk, chunks)
-    result = np.hstack(list(results))
-    return result
 
 class Downsampler:
     def __init__(self):
@@ -200,9 +177,9 @@ class Downsampler:
             if factor != -1:
                 return decimate(arr, factor, axis=-1)
             else:
-                arr = arr.reshape(arr.shape[0], -1, factors[0])
-                arr = multithreaded_mean(arr, factors[0])
-                return decimate(arr, factors[1], axis=-1)
+                arr = arr.reshape(arr.shape[0], int((CHUNK_SIZE + (2 * CHUNK_OVERLAP)) * RAW_SPS / factors[0]), factors[0])
+                arr = multithreaded_mean(arr, axis=2)
+                return decimate(arr, factors[1], axis=1)
         elif type == "mean":
             if factors != []:
                 raise NotImplementedError("Mean downsampling does not support multiple factors")
@@ -255,7 +232,7 @@ class Downsampler:
             start_time_overlap = last_data_time - 2 * CHUNK_OVERLAP
             end_time_overlap = last_data_time + CHUNK_SIZE
             current_time = start_time_overlap
-        print(f"Start time overlap: {start_time_overlap}")
+        # print(f"Start time overlap: {start_time_overlap}")
         while len(raw_files_list) > 1:
             # Load the last file in the list (FIFO)
             dir_path, file = raw_files_list[-1]
@@ -285,36 +262,36 @@ class Downsampler:
                 return -1, -1
             
             # Load the data
-            data = self._load_segy_data(os.path.join(RAW_DATA_PATH, dir_path, file))
+            packet_data = self._load_segy_data(os.path.join(RAW_DATA_PATH, dir_path, file))
 
             if data_start_ts < start_time_overlap:
                 # Cut the data if it starts before the start time overlap
-                data = data[:, int(round(start_time_overlap - data_start_ts, 1) * RAW_SPS) :]
+                packet_data = packet_data[:, int(round(start_time_overlap - data_start_ts, 1) * RAW_SPS) :]
                 offset_pointer = int(round(start_time_overlap - data_start_ts, 1) * RAW_SPS)
-                self.raw_data_array[:, :data.shape[1]] = data
+                np.copyto(self.raw_data_array[:, :packet_data.shape[1]], packet_data, casting="unsafe")
                 # Update the current time (used for checking for missing data)
-                current_time += data.shape[1] / RAW_SPS
+                current_time += packet_data.shape[1] / RAW_SPS
             elif start_time_overlap + PACKET_SIZE + (offset_pointer / RAW_SPS) >= end_time_overlap:
                 # Cut the data if it ends after the end time overlap
-                data = data[:, : int(round(end_time_overlap - data_start_ts, 1) * RAW_SPS)]
-                self.raw_data_array[:, offset_pointer:] = data
+                packet_data = packet_data[:, : int(round(end_time_overlap - data_start_ts, 1) * RAW_SPS)]
+                np.copyto(self.raw_data_array[:, offset_pointer:], packet_data, casting="unsafe")
                 # Set the last processed file and offset
                 self.last_processed_file = file
                 # Set the last file offset to the length of the cut data
-                self.last_file_offset = data.shape[1]
-                offset_pointer += data.shape[1]
-                current_time += data.shape[1] / RAW_SPS
+                self.last_file_offset = packet_data.shape[1]
+                offset_pointer += packet_data.shape[1]
+                current_time += packet_data.shape[1] / RAW_SPS
 
                 # Exit the loop if the end time overlap is reached (no need to load more files)
                 break
             else:
-                self.raw_data_array[:, offset_pointer : offset_pointer + data.shape[1]] = data
-                offset_pointer += data.shape[1]
-                current_time += data.shape[1] / RAW_SPS
-            print(f"Loaded {file}")
-            print(f"Data shape: {self.raw_data_array.shape}")
-            print(f"Offset pointer: {offset_pointer}")
-            print(f"Current time: {current_time}")
+                np.copyto(self.raw_data_array[:, offset_pointer : offset_pointer + packet_data.shape[1]], packet_data, casting="unsafe")
+                offset_pointer += packet_data.shape[1]
+                current_time += packet_data.shape[1] / RAW_SPS
+            # print(f"Loaded {file}")
+            # print(f"Data shape: {self.raw_data_array.shape}")
+            # print(f"Offset pointer: {offset_pointer}")
+            # print(f"Current time: {current_time}")
 
             # Remove processed file from the list
             # **Note**: If file is last in the current chunk, it **will not** be removed,
@@ -329,30 +306,34 @@ class Downsampler:
                 end_time_overlap = data_start_ts + CHUNK_SIZE + 2 * CHUNK_OVERLAP
             
             current_time = start_time_overlap
-            data = self._load_segy_data(os.path.join(RAW_DATA_PATH, dir_path, file))
+            packet_data = self._load_segy_data(os.path.join(RAW_DATA_PATH, dir_path, file))
             if data_start_ts < start_time_overlap:
-                data = data[:, int(round(start_time_overlap - data_start_ts, 1) * RAW_SPS) :]
+                packet_data = packet_data[:, int(round(start_time_overlap - data_start_ts, 1) * RAW_SPS) :]
                 offset_pointer = int(round(start_time_overlap - data_start_ts, 1) * RAW_SPS)
-                self.raw_data_array[:, :data.shape[1]] = data
-                current_time += data.shape[1] / RAW_SPS
+                np.copyto(self.raw_data_array[:, :packet_data.shape[1]], packet_data, casting="unsafe")
+                current_time += packet_data.shape[1] / RAW_SPS
             elif start_time_overlap + PACKET_SIZE + (offset_pointer / RAW_SPS) >= end_time_overlap:
-                data = data[:, : int(round(end_time_overlap - data_start_ts, 1) * RAW_SPS)]
-                self.raw_data_array[:, offset_pointer:] = data
+                packet_data = packet_data[:, : int(round(end_time_overlap - data_start_ts, 1) * RAW_SPS)]
+                np.copyto(self.raw_data_array[:, offset_pointer:], packet_data, casting="unsafe")
                 self.last_processed_file = file
-                self.last_file_offset = data.shape[1]
-                offset_pointer += data.shape[1]
-                current_time += data.shape[1] / RAW_SPS
+                self.last_file_offset = packet_data.shape[1]
+                offset_pointer += packet_data.shape[1]
+                current_time += packet_data.shape[1] / RAW_SPS
             else:
-                self.raw_data_array[:, offset_pointer : offset_pointer + data.shape[1]] = data
-                offset_pointer += data.shape[1]
-                current_time += data.shape[1] / RAW_SPS
-            print(f"Loaded {file}")
-            print(f"Data shape: {self.raw_data_array.shape}")
-            print(f"Offset pointer: {offset_pointer}")
+                np.copyto(self.raw_data_array[:, offset_pointer : offset_pointer + packet_data.shape[1]], packet_data, casting="unsafe")
+                offset_pointer += packet_data.shape[1]
+                current_time += packet_data.shape[1] / RAW_SPS
+            # print(f"Loaded {file}")
+            # print(f"Data shape: {self.raw_data_array.shape}")
+            # print(f"Offset pointer: {offset_pointer}")
+
+            raw_files_list.pop(-1)
 
             if offset_pointer != self.raw_data_array.shape[1]:
-                raise ValueError(f"Last file has not filled the array. Offset pointer: {offset_pointer}, array shape: {self.raw_data_array.shape}")
-
+                # raise ValueError(f"Last file {file} does not fill the array completely")
+                return -1, -1
+            
+        # raise KeyboardInterrupt
         return start_time_overlap, end_time_overlap
     
     def write_downsampled_output(self, down_data, start_time_overlap, end_time_overlap):
@@ -398,20 +379,18 @@ class Downsampler:
         """
         Run the downsampling process.
         """
-        start_time = datetime.now(tz=pytz.UTC)
+        print("Starting the downsampling process...")
         raw_files_list = self.list_raw_files()
-        while True:
+        while raw_files_list:
             start_time_overlap, end_time_overlap = self.load_chuck_raw_data(raw_files_list)
             if start_time_overlap == -1 and end_time_overlap == -1:
-                print(f"Data is missing!")
+                # print(f"Data is missing!")
                 continue
             down_data = self.downsample_raw_data()
             self._validate_downsampled_data(down_data)
             self.write_downsampled_output(down_data, start_time_overlap, end_time_overlap)
             self.update_last_file_status()
-            self.raw_data_array = np.zeros((NUM_CHANNELS, RAW_SPS * CHUNK_SIZE + 2 * RAW_SPS * CHUNK_OVERLAP))
-            print(f"Processed data from {start_time_overlap} to {end_time_overlap}")
-            return
-if __name__ == "__main__":
-    downsampler = Downsampler()
-    downsampler.run()
+            
+            # self.raw_data_array = np.zeros((NUM_CHANNELS, RAW_SPS * CHUNK_SIZE + 2 * RAW_SPS * CHUNK_OVERLAP))
+            # print(f"Processed data from {start_time_overlap} to {end_time_overlap}")
+        # print(f"Downsampling process completed in {end_time - start_time} seconds")
