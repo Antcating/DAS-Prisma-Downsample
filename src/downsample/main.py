@@ -228,9 +228,15 @@ class Downsampler:
         ValueError
             If the last file does not fill the array completely.
         """
+        # Initialize the offset pointer to 0
+        # This pointer will be used to keep track of the position in the array
         offset_pointer = 0
 
+        # Check if the last processed file is not set (first run ever)
+        # or the data is missing (last file offset is set to -1)
         if self.last_processed_file == "" or self.last_file_offset == -1:
+            # Special case when there is insufficient information 
+            # to determine the start and end times of the chunk
             start_time_overlap = 0
             end_time_overlap = float("inf")
         else:
@@ -282,17 +288,24 @@ class Downsampler:
             data = self._load_segy_data(os.path.join(RAW_DATA_PATH, dir_path, file))
 
             if data_start_ts < start_time_overlap:
+                # Cut the data if it starts before the start time overlap
                 data = data[:, int(round(start_time_overlap - data_start_ts, 1) * RAW_SPS) :]
                 offset_pointer = int(round(start_time_overlap - data_start_ts, 1) * RAW_SPS)
                 self.raw_data_array[:, :data.shape[1]] = data
+                # Update the current time (used for checking for missing data)
                 current_time += data.shape[1] / RAW_SPS
             elif start_time_overlap + PACKET_SIZE + (offset_pointer / RAW_SPS) >= end_time_overlap:
+                # Cut the data if it ends after the end time overlap
                 data = data[:, : int(round(end_time_overlap - data_start_ts, 1) * RAW_SPS)]
                 self.raw_data_array[:, offset_pointer:] = data
+                # Set the last processed file and offset
                 self.last_processed_file = file
+                # Set the last file offset to the length of the cut data
                 self.last_file_offset = data.shape[1]
                 offset_pointer += data.shape[1]
                 current_time += data.shape[1] / RAW_SPS
+
+                # Exit the loop if the end time overlap is reached (no need to load more files)
                 break
             else:
                 self.raw_data_array[:, offset_pointer : offset_pointer + data.shape[1]] = data
@@ -302,6 +315,10 @@ class Downsampler:
             print(f"Data shape: {self.raw_data_array.shape}")
             print(f"Offset pointer: {offset_pointer}")
             print(f"Current time: {current_time}")
+
+            # Remove processed file from the list
+            # **Note**: If file is last in the current chunk, it **will not** be removed,
+            # because it will be used in the next chunk (if it was cut in the middle)
             raw_files_list.pop(-1)
         else:
             dir_path, file = raw_files_list[-1]
