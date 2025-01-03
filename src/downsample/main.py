@@ -91,7 +91,7 @@ class Downsampler:
         ]
 
         for dir_path in sorted(dirs, key=lambda x: os.path.getmtime(os.path.join(RAW_DATA_PATH, x))):
-            for root, dirs, files in os.walk(os.path.join(RAW_DATA_PATH, dir_path)):
+            for _, dirs, files in os.walk(os.path.join(RAW_DATA_PATH, dir_path)):
                 # Filter out non-SEG-Y files (e.g. metadata files)
                 files = [file for file in files if file.endswith(".segy")]
                 for file in sorted(files, key=lambda x: self._get_file_timestamp(x)):
@@ -184,6 +184,15 @@ class Downsampler:
             if factor != -1:
                 return decimate(arr, factor, axis=-1)
             else:
+                # We have to downsample raw data by factor 15 in time.
+                # On the old system we used mean downsampling by factor 15 directly, 
+                # but it was creating aliasing artifacts at high frequencies.
+                # To avoid this, we switched to scipy.signal.decimate function. 
+                # But as it turned out, it is too slow to run in real-time, 
+                # so I have rewritten it to use multithreading and also we decided to do downsampling in two steps:
+                # 1. Fast but noisy mean downsampling by factor 3 in time.
+                # 2. Slow but clean decimate downsampling by factor 5 in time.
+                # This way we avoid aliasing and keep the system real-time.
                 arr = arr.reshape(arr.shape[0], int((CHUNK_SIZE + (2 * CHUNK_OVERLAP)) * RAW_SPS / factors[0]), factors[0])
                 arr = multithreaded_mean(arr, axis=2, num_thread=self.num_threads)
                 return decimate(arr, factors[1], axis=1, num_thread=self.num_threads)
@@ -193,6 +202,41 @@ class Downsampler:
             arr = arr.reshape(arr.shape[0], -1, factor)
             return multithreaded_mean(arr, factor)
         
+    def _determine_chunk_bounds(self) -> tuple:
+        # Check if the last processed file is not set (first run ever)
+        # or the data is missing (last file offset is set to -1)
+        if self.last_processed_file == "" or self.last_file_offset == -1:
+            # Special case when there is insufficient information 
+            # to determine the start and end times of the chunk
+            return 0, float("inf")
+        last_data_time = self._get_file_timestamp(self.last_processed_file) + self.last_file_offset / RAW_SPS
+
+        # Borrow 2 CHUNK_OVERLAP seconds from the *previous* chunk with reference to the offset pointer
+        # Because the filter is applied in frequency domain:
+        # it is important to cut-off the edges.
+        # Data will be taken from the middle of the augmented chunk:
+        # |---CHUNK_OVERLAP---|---CHUNK_SIZE---|---CHUNK_OVERLAP---|
+
+        # Explanation why we need to subtract 2 * CHUNK_OVERLAP from the last data time:
+        # Offset pointer shows the position in the array up to which the data was taken from the last file
+        # Because of the structure of the array, the offset pointer points to the position after overlap, 
+        # so we need to subtract it (and the overlap) from the last data time for current chunk.
+        start_time_overlap = last_data_time - 2 * CHUNK_OVERLAP
+        end_time_overlap = last_data_time + CHUNK_SIZE
+        return start_time_overlap, end_time_overlap
+
+    def _determine_first_chunk_bounds(self, data_start_ts: float) -> tuple:
+        start_time_overlap = data_start_ts
+        
+        # Borrow 2 CHUNK_OVERLAP seconds from the *next* chunk
+        
+        # Because the filter is applied in frequency domain:
+        # it is important to cut-off the edges.
+        # Data will be taken from the middle of the augmented chunk:
+        # |---CHUNK_OVERLAP---|---CHUNK_SIZE---|---CHUNK_OVERLAP---|
+        end_time_overlap = data_start_ts + CHUNK_SIZE + 2 * CHUNK_OVERLAP
+        return start_time_overlap, end_time_overlap
+
     def load_chuck_raw_data(self, raw_files_list):
         """
         Load raw data from a list of raw files and process it into a contiguous array.
@@ -216,29 +260,9 @@ class Downsampler:
         # This pointer will be used to keep track of the position in the array
         offset_pointer = 0
 
-        # Check if the last processed file is not set (first run ever)
-        # or the data is missing (last file offset is set to -1)
-        if self.last_processed_file == "" or self.last_file_offset == -1:
-            # Special case when there is insufficient information 
-            # to determine the start and end times of the chunk
-            start_time_overlap = 0
-            end_time_overlap = float("inf")
-        else:
-            last_data_time = self._get_file_timestamp(self.last_processed_file) + self.last_file_offset / RAW_SPS
-            # Borrow 2 CHUNK_OVERLAP seconds from the *previous* chunk with reference to the offset pointer
-
-            # Because the filter is applied in frequency domain:
-            # it is important to cut-off the edges.
-            # Data will be taken from the middle of the augmented chunk:
-            # |---CHUNK_OVERLAP---|---CHUNK_SIZE---|---CHUNK_OVERLAP---|
-
-            # Explanation why we need to subtract 2 * CHUNK_OVERLAP from the last data time:
-            # Offset pointer shows the position in the array up to which the data was taken from the last file
-            # Because of the structure of the array, the offset pointer points to the position after overlap, 
-            # so we need to subtract it (and the overlap) from the last data time for current chunk.
-            start_time_overlap = last_data_time - 2 * CHUNK_OVERLAP
-            end_time_overlap = last_data_time + CHUNK_SIZE
-            current_time = start_time_overlap
+        # Determine the start and end time of the chunk (with overlaps on both sides)
+        start_time_overlap, end_time_overlap = self._determine_chunk_bounds()
+        current_time = start_time_overlap
         # print(f"Start time overlap: {start_time_overlap}")
         while len(raw_files_list) > 0:
             # Load the last file in the list (FIFO)
@@ -246,18 +270,11 @@ class Downsampler:
             # Get the timestamp of the file
             data_start_ts = self._get_file_timestamp(file)
             
-            # Check if the start time overlap is not set
+            # Check if the start time overlap was not determined (equal to 0)
             # 1. It is the first run ever without any processed files
-            # 2. The data is missing and the start time overlap is set to -1
+            # 2. The data is missing and the last file offset is set to -1 -> start time overlap is set to 0
             if start_time_overlap == 0:
-                start_time_overlap = data_start_ts
-                # Borrow 2 CHUNK_OVERLAP seconds from the *next* chunk
-                
-                # Because the filter is applied in frequency domain:
-                # it is important to cut-off the edges.
-                # Data will be taken from the middle of the augmented chunk:
-                # |---CHUNK_OVERLAP---|---CHUNK_SIZE---|---CHUNK_OVERLAP---|
-                end_time_overlap = data_start_ts + CHUNK_SIZE + 2 * CHUNK_OVERLAP            
+                start_time_overlap, end_time_overlap = self._determine_first_chunk_bounds(data_start_ts)
                 current_time = start_time_overlap
 
             # Check if the data is missing
@@ -305,7 +322,6 @@ class Downsampler:
         if offset_pointer != self.raw_data_array.shape[1]:
             # raise ValueError(f"Last file {file} does not fill the array completely")
             return -1, -1
-        # raise KeyboardInterrupt
         return start_time_overlap, end_time_overlap
     
     def write_downsampled_output(self, down_data, start_time_overlap, end_time_overlap):
@@ -337,6 +353,7 @@ class Downsampler:
 
             f.attrs["_downsampler_version"] = self.version
             f.attrs["_downsampler_last_updated"] = self.last_updated
+        log.info(f"Downsampled chunk starting at {start_time} written to {file_path}")
         
     def update_last_file_status(self):
         """
