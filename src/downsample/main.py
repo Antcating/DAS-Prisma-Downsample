@@ -1,31 +1,31 @@
 import os
 from datetime import datetime, timedelta
 
+import h5py
 import pytz
 import numpy as np
 # from scipy.signal import decimate
 from utils.multithread import decimate, multithreaded_mean
-
-import h5py
-
-from concurrent.futures import ThreadPoolExecutor
-
-RAW_DATA_PATH = "/Users/achating-macpro/Work/DAS-Systems/DAS-Prisma/DAS-Prisma-Downsample/input"
-DOWN_DATA_PATH = "output"
-TMP_PATH = "tmp"
-PACKET_SIZE = 20 # in seconds
-CHUNK_SIZE = 60 # in seconds
-CHUNK_OVERLAP = 1 # in seconds
-SPS = 100 # samples per second
-DX = 9.8 # meters
-RAW_SPS = 1500 # samples per second
-NUM_CHANNELS = 3746
+from log.main_logger import logger as log
+from config import (
+    RAW_DATA_PATH,
+    DOWN_DATA_PATH,
+    TMP_PATH,
+    PACKET_SIZE,
+    CHUNK_SIZE,
+    CHUNK_OVERLAP,
+    SPS,
+    DX,
+    RAW_SPS,
+    RAW_DX,
+    NUM_CHANNELS,
+)
 
 class Downsampler:
     def __init__(self, num_threads=4):
         self.num_threads = num_threads
 
-        self.raw_data_array = np.zeros((NUM_CHANNELS, RAW_SPS * CHUNK_SIZE + 2 * RAW_SPS * CHUNK_OVERLAP))
+        self.raw_data_array = np.zeros((NUM_CHANNELS, int(RAW_SPS * CHUNK_SIZE + 2 * RAW_SPS * CHUNK_OVERLAP)))
         self.last_processed_file, self.last_file_offset = self._read_last_file_status()
 
         self.time_delay_threshold = 0.05
@@ -87,15 +87,20 @@ class Downsampler:
         dirs = [
             dir for dir in os.listdir(RAW_DATA_PATH)
             if os.path.isdir(os.path.join(RAW_DATA_PATH, dir))
+            
         ]
 
         for dir_path in sorted(dirs, key=lambda x: os.path.getmtime(os.path.join(RAW_DATA_PATH, x))):
             for root, dirs, files in os.walk(os.path.join(RAW_DATA_PATH, dir_path)):
+                # Filter out non-SEG-Y files (e.g. metadata files)
                 files = [file for file in files if file.endswith(".segy")]
                 for file in sorted(files, key=lambda x: self._get_file_timestamp(x)):
                     file_timestamp = self._get_file_timestamp(file)
+                    # Only process files that are newer than the last processed file
+                    # But also include the last processed file because it might have been cut in the middle
                     if file.endswith(".segy") and file_timestamp >= last_data_time:
                         raw_files_list.append([dir_path, file])
+        # Reverse the list to process the oldest files first (FIFO)
         raw_files_list = raw_files_list[::-1]
         return raw_files_list
     
@@ -235,7 +240,7 @@ class Downsampler:
             end_time_overlap = last_data_time + CHUNK_SIZE
             current_time = start_time_overlap
         # print(f"Start time overlap: {start_time_overlap}")
-        while len(raw_files_list) > 1:
+        while len(raw_files_list) > 0:
             # Load the last file in the list (FIFO)
             dir_path, file = raw_files_list[-1]
             # Get the timestamp of the file
@@ -257,6 +262,7 @@ class Downsampler:
 
             # Check if the data is missing
             if np.abs(current_time - data_start_ts) > self.time_delay_threshold:
+                log.warning(f"Data is missing between {current_time} and {data_start_ts}")
                 # Set the last processed file to the current file (to skip previous file on next iteration)
                 self.last_processed_file = file
                 # Set the last file offset to -1 to indicate that the data is missing
@@ -270,13 +276,13 @@ class Downsampler:
                 # Cut the data if it starts before the start time overlap
                 packet_data = packet_data[:, int(round(start_time_overlap - data_start_ts, 1) * RAW_SPS) :]
                 offset_pointer = int(round(start_time_overlap - data_start_ts, 1) * RAW_SPS)
-                np.copyto(self.raw_data_array[:, :packet_data.shape[1]], packet_data, casting="unsafe")
+                self.raw_data_array[:, :packet_data.shape[1]] = packet_data
                 # Update the current time (used for checking for missing data)
                 current_time += packet_data.shape[1] / RAW_SPS
             elif start_time_overlap + PACKET_SIZE + (offset_pointer / RAW_SPS) >= end_time_overlap:
                 # Cut the data if it ends after the end time overlap
                 packet_data = packet_data[:, : int(round(end_time_overlap - data_start_ts, 1) * RAW_SPS)]
-                np.copyto(self.raw_data_array[:, offset_pointer:], packet_data, casting="unsafe")
+                self.raw_data_array[:, offset_pointer:] = packet_data
                 # Set the last processed file and offset
                 self.last_processed_file = file
                 # Set the last file offset to the length of the cut data
@@ -287,54 +293,18 @@ class Downsampler:
                 # Exit the loop if the end time overlap is reached (no need to load more files)
                 break
             else:
-                np.copyto(self.raw_data_array[:, offset_pointer : offset_pointer + packet_data.shape[1]], packet_data, casting="unsafe")
+                self.raw_data_array[:, offset_pointer : offset_pointer + packet_data.shape[1]] = packet_data
                 offset_pointer += packet_data.shape[1]
                 current_time += packet_data.shape[1] / RAW_SPS
-            # print(f"Loaded {file}")
-            # print(f"Data shape: {self.raw_data_array.shape}")
-            # print(f"Offset pointer: {offset_pointer}")
-            # print(f"Current time: {current_time}")
 
             # Remove processed file from the list
             # **Note**: If file is last in the current chunk, it **will not** be removed,
             # because it will be used in the next chunk (if it was cut in the middle)
             raw_files_list.pop(-1)
-        else:
-            dir_path, file = raw_files_list[-1]
-            data_start_ts = self._get_file_timestamp(file)
-            
-            if start_time_overlap == 0:
-                start_time_overlap = data_start_ts
-                end_time_overlap = data_start_ts + CHUNK_SIZE + 2 * CHUNK_OVERLAP
-            
-            current_time = start_time_overlap
-            packet_data = self._load_segy_data(os.path.join(RAW_DATA_PATH, dir_path, file))
-            if data_start_ts < start_time_overlap:
-                packet_data = packet_data[:, int(round(start_time_overlap - data_start_ts, 1) * RAW_SPS) :]
-                offset_pointer = int(round(start_time_overlap - data_start_ts, 1) * RAW_SPS)
-                np.copyto(self.raw_data_array[:, :packet_data.shape[1]], packet_data, casting="unsafe")
-                current_time += packet_data.shape[1] / RAW_SPS
-            elif start_time_overlap + PACKET_SIZE + (offset_pointer / RAW_SPS) >= end_time_overlap:
-                packet_data = packet_data[:, : int(round(end_time_overlap - data_start_ts, 1) * RAW_SPS)]
-                np.copyto(self.raw_data_array[:, offset_pointer:], packet_data, casting="unsafe")
-                self.last_processed_file = file
-                self.last_file_offset = packet_data.shape[1]
-                offset_pointer += packet_data.shape[1]
-                current_time += packet_data.shape[1] / RAW_SPS
-            else:
-                np.copyto(self.raw_data_array[:, offset_pointer : offset_pointer + packet_data.shape[1]], packet_data, casting="unsafe")
-                offset_pointer += packet_data.shape[1]
-                current_time += packet_data.shape[1] / RAW_SPS
-            # print(f"Loaded {file}")
-            # print(f"Data shape: {self.raw_data_array.shape}")
-            # print(f"Offset pointer: {offset_pointer}")
 
-            raw_files_list.pop(-1)
-
-            if offset_pointer != self.raw_data_array.shape[1]:
-                # raise ValueError(f"Last file {file} does not fill the array completely")
-                return -1, -1
-            
+        if offset_pointer != self.raw_data_array.shape[1]:
+            # raise ValueError(f"Last file {file} does not fill the array completely")
+            return -1, -1
         # raise KeyboardInterrupt
         return start_time_overlap, end_time_overlap
     
@@ -381,18 +351,15 @@ class Downsampler:
         """
         Run the downsampling process.
         """
-        print("Starting the downsampling process...")
+        log.info("Starting downsampling process")
         raw_files_list = self.list_raw_files()
         while raw_files_list:
             start_time_overlap, end_time_overlap = self.load_chuck_raw_data(raw_files_list)
             if start_time_overlap == -1 and end_time_overlap == -1:
-                # print(f"Data is missing!")
+                log.warning(f"Data is missing")
                 continue
             down_data = self.downsample_raw_data()
             self._validate_downsampled_data(down_data)
             self.write_downsampled_output(down_data, start_time_overlap, end_time_overlap)
             self.update_last_file_status()
-            
-            # self.raw_data_array = np.zeros((NUM_CHANNELS, RAW_SPS * CHUNK_SIZE + 2 * RAW_SPS * CHUNK_OVERLAP))
-            # print(f"Processed data from {start_time_overlap} to {end_time_overlap}")
-        # print(f"Downsampling process completed in {end_time - start_time} seconds")
+        log.info("Downsampling process completed")
