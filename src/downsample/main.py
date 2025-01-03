@@ -235,25 +235,50 @@ class Downsampler:
             end_time_overlap = float("inf")
         else:
             last_data_time = self._get_file_timestamp(self.last_processed_file) + self.last_file_offset / RAW_SPS
+            # Borrow 2 CHUNK_OVERLAP seconds from the *previous* chunk with reference to the offset pointer
+
+            # Because the filter is applied in frequency domain:
+            # it is important to cut-off the edges.
+            # Data will be taken from the middle of the augmented chunk:
+            # |---CHUNK_OVERLAP---|---CHUNK_SIZE---|---CHUNK_OVERLAP---|
+
+            # Explanation why we need to subtract 2 * CHUNK_OVERLAP from the last data time:
+            # Offset pointer shows the position in the array up to which the data was taken from the last file
+            # Because of the structure of the array, the offset pointer points to the position after overlap, 
+            # so we need to subtract it (and the overlap) from the last data time for current chunk.
             start_time_overlap = last_data_time - 2 * CHUNK_OVERLAP
             end_time_overlap = last_data_time + CHUNK_SIZE
             current_time = start_time_overlap
         print(f"Start time overlap: {start_time_overlap}")
         while len(raw_files_list) > 1:
+            # Load the last file in the list (FIFO)
             dir_path, file = raw_files_list[-1]
+            # Get the timestamp of the file
             data_start_ts = self._get_file_timestamp(file)
             
+            # Check if the start time overlap is not set
+            # 1. It is the first run ever without any processed files
+            # 2. The data is missing and the start time overlap is set to -1
             if start_time_overlap == 0:
                 start_time_overlap = data_start_ts
+                # Borrow 2 CHUNK_OVERLAP seconds from the *next* chunk
+                
+                # Because the filter is applied in frequency domain:
+                # it is important to cut-off the edges.
+                # Data will be taken from the middle of the augmented chunk:
+                # |---CHUNK_OVERLAP---|---CHUNK_SIZE---|---CHUNK_OVERLAP---|
                 end_time_overlap = data_start_ts + CHUNK_SIZE + 2 * CHUNK_OVERLAP            
                 current_time = start_time_overlap
 
+            # Check if the data is missing
             if np.abs(current_time - data_start_ts) > self.time_delay_threshold:
+                # Set the last processed file to the current file (to skip previous file on next iteration)
                 self.last_processed_file = file
+                # Set the last file offset to -1 to indicate that the data is missing
                 self.last_file_offset = -1
                 return -1, -1
-                raise ValueError(f'Data from {current_time} to {data_start_ts} is missing!')
             
+            # Load the data
             data = self._load_segy_data(os.path.join(RAW_DATA_PATH, dir_path, file))
 
             if data_start_ts < start_time_overlap:
@@ -369,7 +394,7 @@ class Downsampler:
             self.update_last_file_status()
             self.raw_data_array = np.zeros((NUM_CHANNELS, RAW_SPS * CHUNK_SIZE + 2 * RAW_SPS * CHUNK_OVERLAP))
             print(f"Processed data from {start_time_overlap} to {end_time_overlap}")
-
+            return
 if __name__ == "__main__":
     downsampler = Downsampler()
     downsampler.run()
