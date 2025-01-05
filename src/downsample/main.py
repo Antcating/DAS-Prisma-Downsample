@@ -1,10 +1,9 @@
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import h5py
 import pytz
 import numpy as np
-# from scipy.signal import decimate
 from utils.multithread import decimate, multithreaded_mean
 from log.main_logger import logger as log
 from config import (
@@ -266,7 +265,6 @@ class Downsampler:
         # Determine the start and end time of the chunk (with overlaps on both sides)
         start_time_overlap, end_time_overlap = self._determine_chunk_bounds()
         current_time = start_time_overlap
-        # print(f"Start time overlap: {start_time_overlap}")
         while len(raw_files_list) > 0:
             # Load the last file in the list (FIFO)
             dir_path, file = raw_files_list[-1]
