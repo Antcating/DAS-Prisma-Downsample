@@ -89,7 +89,7 @@ class Downsampler:
         dirs = [
             dir for dir in os.listdir(RAW_DATA_PATH)
             if os.path.isdir(os.path.join(RAW_DATA_PATH, dir))
-            
+            and os.path.getmtime(os.path.join(RAW_DATA_PATH, dir)) < today.timestamp()
         ]
 
         for dir_path in sorted(dirs, key=lambda x: os.path.getmtime(os.path.join(RAW_DATA_PATH, x))):
