@@ -23,7 +23,35 @@ from config import (
 )
 
 class Downsampler:
-    def __init__(self, num_threads=NUM_THREADS):
+    def __init__(
+            self, 
+            raw_data_path=RAW_DATA_PATH,
+            down_data_path=DOWN_DATA_PATH,
+            tmp_path=TMP_PATH,
+            packet_size=PACKET_SIZE,
+            chunk_size=CHUNK_SIZE,
+            chunk_overlap=CHUNK_OVERLAP,
+            sps=SPS,
+            dx=DX,
+            raw_sps=RAW_SPS,
+            raw_dx=RAW_DX,
+            factors_time=FACTORS_TIME,
+            factors_space=FACTORS_SPACE,
+            num_threads=NUM_THREADS,
+    ):
+        self.raw_data_path = raw_data_path
+        self.down_data_path = down_data_path
+        self.tmp_path = tmp_path
+        self.packet_size = packet_size
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+        self.sps = sps
+        self.dx = dx
+        self.raw_sps = raw_sps
+        self.raw_dx = raw_dx
+        self.factors_time = factors_time
+        self.factors_space = factors_space
+        
         self.num_threads = num_threads
 
         self.num_channels = None
@@ -63,7 +91,7 @@ class Downsampler:
         numpy.ndarray
             The preallocated raw data array.
         """
-        self.raw_data_array = np.zeros((self.num_channels, int(RAW_SPS * CHUNK_SIZE + 2 * RAW_SPS * CHUNK_OVERLAP)))
+        self.raw_data_array = np.zeros((self.num_channels, int(self.raw_sps * self.chunk_size + 2 * self.raw_sps * self.chunk_overlap)))
     
     def _read_last_file_status(self):
         """
@@ -75,7 +103,7 @@ class Downsampler:
             The last processed file and its offset.
         """
         try:
-            with open(os.path.join(TMP_PATH, "status"), "r") as f:
+            with open(os.path.join(self.tmp_path, "status"), "r") as f:
                 last_processed_file, last_chunk_offset = f.read().split(",")
                 return last_processed_file, int(last_chunk_offset)
         except FileNotFoundError:
@@ -98,13 +126,13 @@ class Downsampler:
             last_data_time = self._get_file_timestamp(self.last_processed_file)
         today = datetime.now(tz=pytz.UTC).replace(hour=0, minute=0, second=0, microsecond=0)
         dirs = [
-            dir for dir in os.listdir(RAW_DATA_PATH)
-            if os.path.isdir(os.path.join(RAW_DATA_PATH, dir))
-            and os.path.getmtime(os.path.join(RAW_DATA_PATH, dir)) < today.timestamp()
+            dir for dir in os.listdir(self.raw_data_path)
+            if os.path.isdir(os.path.join(self.raw_data_path, dir))
+            and os.path.getmtime(os.path.join(self.raw_data_path, dir)) < today.timestamp()
         ]
 
-        for dir_path in sorted(dirs, key=lambda x: os.path.getmtime(os.path.join(RAW_DATA_PATH, x))):
-            for _, dirs, files in os.walk(os.path.join(RAW_DATA_PATH, dir_path)):
+        for dir_path in sorted(dirs, key=lambda x: os.path.getmtime(os.path.join(self.raw_data_path, x))):
+            for _, dirs, files in os.walk(os.path.join(self.raw_data_path, dir_path)):
                 # Filter out non-SEG-Y files (e.g. metadata files)
                 files = [file for file in files if file.endswith(".segy")]
                 for file in sorted(files, key=lambda x: self._get_file_timestamp(x)):
@@ -131,11 +159,11 @@ class Downsampler:
         numpy.ndarray
             The loaded data.
         """
-        with open(os.path.join(RAW_DATA_PATH, file_path), "rb") as f:
+        with open(os.path.join(self.raw_data_path, file_path), "rb") as f:
             f.seek(3714)
             traces = np.frombuffer(f.read(2), dtype=np.int16)[0]
         mmap_dtype = np.dtype([("headers", np.void, 240), ("data", "f4", traces)])
-        segy_data = np.memmap(os.path.join(RAW_DATA_PATH, file_path), dtype=mmap_dtype, mode="r", offset=3600)
+        segy_data = np.memmap(os.path.join(self.raw_data_path, file_path), dtype=mmap_dtype, mode="r", offset=3600)
         data = segy_data["data"]
         return data
 
@@ -148,8 +176,8 @@ class Downsampler:
         numpy.ndarray
             The downsampled data.
         """
-        down_data = self._downsample_array(self.raw_data_array, factors=FACTORS_TIME, type="scipy")
-        down_data = down_data[:, CHUNK_OVERLAP * SPS : -CHUNK_OVERLAP * SPS]
+        down_data = self._downsample_array(self.raw_data_array, factors=self.factors_time, type="scipy")
+        down_data = down_data[:, self.chunk_overlap * self.sps : -self.chunk_overlap * self.sps]
         return down_data
 
     def _validate_downsampled_data(self, down_data):
@@ -166,8 +194,8 @@ class Downsampler:
         ValueError
             If the downsampled data is invalid.
         """
-        if down_data.shape[1] != CHUNK_SIZE * SPS:
-            raise ValueError(f"Downsampled data shape is {down_data.shape}, expected {(self.num_channels, CHUNK_SIZE * SPS)}")
+        if down_data.shape[1] != self.chunk_size * self.sps:
+            raise ValueError(f"Downsampled data shape is {down_data.shape}, expected {(self.num_channels, self.chunk_size * self.sps)}")
         if np.isnan(down_data).any():
             raise ValueError("Downsampled data contains NaN values")
         if np.isinf(down_data).any():
@@ -206,7 +234,7 @@ class Downsampler:
                 # 1. Fast but noisy mean downsampling by factor 3 in time.
                 # 2. Slow but clean decimate downsampling by factor 5 in time.
                 # This way we avoid aliasing and keep the system real-time.
-                arr = arr.reshape(arr.shape[0], int((CHUNK_SIZE + (2 * CHUNK_OVERLAP)) * RAW_SPS / factors[0]), factors[0])
+                arr = arr.reshape(arr.shape[0], int((self.chunk_size + (2 * self.chunk_overlap)) * self.raw_sps / factors[0]), factors[0])
                 arr = multithreaded_mean(arr, axis=2, num_thread=self.num_threads)
                 return decimate(arr, factors[1], axis=1, num_thread=self.num_threads)
         elif type == "mean":
@@ -222,7 +250,7 @@ class Downsampler:
             # Special case when there is insufficient information 
             # to determine the start and end times of the chunk
             return 0, float("inf")
-        last_data_time = self._get_file_timestamp(self.last_processed_file) + self.last_file_offset / RAW_SPS
+        last_data_time = self._get_file_timestamp(self.last_processed_file) + self.last_file_offset / self.raw_sps
 
         # Borrow 2 CHUNK_OVERLAP seconds from the *previous* chunk with reference to the offset pointer
         # Because the filter is applied in frequency domain:
@@ -234,8 +262,8 @@ class Downsampler:
         # Offset pointer shows the position in the array up to which the data was taken from the last file
         # Because of the structure of the array, the offset pointer points to the position after overlap, 
         # so we need to subtract it (and the overlap) from the last data time for current chunk.
-        start_time_overlap = last_data_time - 2 * CHUNK_OVERLAP
-        end_time_overlap = last_data_time + CHUNK_SIZE
+        start_time_overlap = last_data_time - 2 * self.chunk_overlap
+        end_time_overlap = last_data_time + self.chunk_size
         return start_time_overlap, end_time_overlap
 
     def _determine_first_chunk_bounds(self, data_start_ts: float) -> tuple:
@@ -247,7 +275,7 @@ class Downsampler:
         # it is important to cut-off the edges.
         # Data will be taken from the middle of the augmented chunk:
         # |---CHUNK_OVERLAP---|---CHUNK_SIZE---|---CHUNK_OVERLAP---|
-        end_time_overlap = data_start_ts + CHUNK_SIZE + 2 * CHUNK_OVERLAP
+        end_time_overlap = data_start_ts + self.chunk_size + 2 * self.chunk_overlap
         return start_time_overlap, end_time_overlap
 
     def _load_chuck_raw_data(self, raw_files_list):
@@ -299,7 +327,7 @@ class Downsampler:
                 return -1, -1
             
             # Load the data
-            packet_data = self._load_segy_data(os.path.join(RAW_DATA_PATH, dir_path, file))
+            packet_data = self._load_segy_data(os.path.join(self.raw_data_path, dir_path, file))
 
             # Check if the number of channels in the data is consistent with the expected number of channels
             if packet_data.shape[0] != self.num_channels:
@@ -313,28 +341,28 @@ class Downsampler:
 
             if data_start_ts < start_time_overlap:
                 # Cut the data if it starts before the start time overlap
-                packet_data = packet_data[:, int(round(start_time_overlap - data_start_ts, 1) * RAW_SPS) :]
-                offset_pointer = int(round(start_time_overlap - data_start_ts, 1) * RAW_SPS)
+                packet_data = packet_data[:, int(round(start_time_overlap - data_start_ts, 1) * self.raw_sps) :]
+                offset_pointer = int(round(start_time_overlap - data_start_ts, 1) * self.raw_sps)
                 self.raw_data_array[:, :packet_data.shape[1]] = packet_data
                 # Update the current time (used for checking for missing data)
-                current_time += packet_data.shape[1] / RAW_SPS
-            elif start_time_overlap + PACKET_SIZE + (offset_pointer / RAW_SPS) >= end_time_overlap:
+                current_time += packet_data.shape[1] / self.raw_sps
+            elif start_time_overlap + self.packet_size + (offset_pointer / self.raw_sps) >= end_time_overlap:
                 # Cut the data if it ends after the end time overlap
-                packet_data = packet_data[:, : int(round(end_time_overlap - data_start_ts, 1) * RAW_SPS)]
+                packet_data = packet_data[:, : int(round(end_time_overlap - data_start_ts, 1) * self.raw_sps)]
                 self.raw_data_array[:, offset_pointer:] = packet_data
                 # Set the last processed file and offset
                 self.last_processed_file = file
                 # Set the last file offset to the length of the cut data
                 self.last_file_offset = packet_data.shape[1]
                 offset_pointer += packet_data.shape[1]
-                current_time += packet_data.shape[1] / RAW_SPS
+                current_time += packet_data.shape[1] / self.raw_sps
 
                 # Exit the loop if the end time overlap is reached (no need to load more files)
                 break
             else:
                 self.raw_data_array[:, offset_pointer : offset_pointer + packet_data.shape[1]] = packet_data
                 offset_pointer += packet_data.shape[1]
-                current_time += packet_data.shape[1] / RAW_SPS
+                current_time += packet_data.shape[1] / self.raw_sps
 
             # Remove processed file from the list
             # **Note**: If file is last in the current chunk, it **will not** be removed,
@@ -359,17 +387,17 @@ class Downsampler:
         end_time_overlap : float
             The end time of the overlap period in seconds since the epoch.
         """
-        start_time = start_time_overlap + CHUNK_OVERLAP
+        start_time = start_time_overlap + self.chunk_overlap
         year, month, day = datetime.fromtimestamp(start_time, tz=pytz.UTC).strftime("%Y-%m-%d").split("-")
 
         file_name = f"{start_time:.2f}.h5"
-        if not os.path.exists(os.path.join(DOWN_DATA_PATH, year, f"{year}{month}{day}")):
-            os.makedirs(os.path.join(DOWN_DATA_PATH, year, f"{year}{month}{day}"))
-        file_path = os.path.join(DOWN_DATA_PATH, year, f"{year}{month}{day}", file_name)
+        if not os.path.exists(os.path.join(self.down_data_path, year, f"{year}{month}{day}")):
+            os.makedirs(os.path.join(self.down_data_path, year, f"{year}{month}{day}"))
+        file_path = os.path.join(self.down_data_path, year, f"{year}{month}{day}", file_name)
         with h5py.File(file_path, "w") as f:
             f.create_dataset("data_down", data=down_data)
-            f.attrs["DX_down"] = DX
-            f.attrs["SPS_down"] = SPS
+            f.attrs["DX_down"] = self.dx
+            f.attrs["SPS_down"] = self.sps
             f.attrs["down_factor_space"] = 1
             f.attrs["down_factor_time"] = 15
 
@@ -381,9 +409,9 @@ class Downsampler:
         """
         Update the status of the last processed file.
         """
-        if not os.path.exists(TMP_PATH):
-            os.makedirs(TMP_PATH)
-        with open(os.path.join(TMP_PATH, "status"), "w") as f:
+        if not os.path.exists(self.tmp_path):
+            os.makedirs(self.tmp_path)
+        with open(os.path.join(self.tmp_path, "status"), "w") as f:
             f.write(f"{self.last_processed_file},{self.last_file_offset}")
         
     def run(self):
@@ -397,7 +425,7 @@ class Downsampler:
             return
         # Read first file to number of traces
         first_file = raw_files_list[-1]
-        first_file_path = os.path.join(RAW_DATA_PATH, first_file[0], first_file[1])
+        first_file_path = os.path.join(self.raw_data_path, first_file[0], first_file[1])
         self.num_channels = self._load_segy_data(first_file_path).shape[0]
         self._preallocate_raw_data_array()
 
