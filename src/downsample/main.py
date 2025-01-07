@@ -403,7 +403,6 @@ class Downsampler:
 
         while raw_files_list:
             log.info(f"Processing {len(raw_files_list)} files")
-            log.info(raw_files_list)
             start_time_overlap, end_time_overlap = self._load_chuck_raw_data(raw_files_list)
             if start_time_overlap == -1 and end_time_overlap == -1:
                 log.warning(f"Problem with a chunk, skipping downsampling")
