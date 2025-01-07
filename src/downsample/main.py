@@ -17,7 +17,6 @@ from config import (
     DX,
     RAW_SPS,
     RAW_DX,
-    NUM_CHANNELS,
     FACTORS_TIME,
     FACTORS_SPACE,
     NUM_THREADS,
@@ -27,7 +26,8 @@ class Downsampler:
     def __init__(self, num_threads=NUM_THREADS):
         self.num_threads = num_threads
 
-        self.raw_data_array = np.zeros((NUM_CHANNELS, int(RAW_SPS * CHUNK_SIZE + 2 * RAW_SPS * CHUNK_OVERLAP)))
+        self.num_channels = None
+        self.raw_data_array: np.ndarray = None
         self.last_processed_file, self.last_file_offset = self._read_last_file_status()
 
         self.time_delay_threshold = 0.05
@@ -53,6 +53,17 @@ class Downsampler:
         file_datetime_utc = file_datetime.astimezone(pytz.UTC)
         file_timestamp = file_datetime_utc.timestamp()
         return file_timestamp
+    
+    def _preallocate_raw_data_array(self):
+        """
+        Preallocate the raw data array.
+
+        Returns:
+        --------
+        numpy.ndarray
+            The preallocated raw data array.
+        """
+        self.raw_data_array = np.zeros((self.num_channels, int(RAW_SPS * CHUNK_SIZE + 2 * RAW_SPS * CHUNK_OVERLAP)))
     
     def _read_last_file_status(self):
         """
@@ -156,7 +167,7 @@ class Downsampler:
             If the downsampled data is invalid.
         """
         if down_data.shape[1] != CHUNK_SIZE * SPS:
-            raise ValueError(f"Downsampled data shape is {down_data.shape}, expected {(NUM_CHANNELS, CHUNK_SIZE * SPS)}")
+            raise ValueError(f"Downsampled data shape is {down_data.shape}, expected {(self.num_channels, CHUNK_SIZE * SPS)}")
         if np.isnan(down_data).any():
             raise ValueError("Downsampled data contains NaN values")
         if np.isinf(down_data).any():
@@ -290,6 +301,16 @@ class Downsampler:
             # Load the data
             packet_data = self._load_segy_data(os.path.join(RAW_DATA_PATH, dir_path, file))
 
+            # Check if the number of channels in the data is consistent with the expected number of channels
+            if packet_data.shape[0] != self.num_channels:
+                log.warning(f"Number of channels in the data is inconsistent with the expected number of channels")
+                log.warning(f"Expected: {self.num_channels}, Actual: {packet_data.shape[0]}")
+                # Set the number of channels to the actual number of channels
+                self.num_channels = packet_data.shape[0]
+                # Reallocate the raw data array with the correct number of channels
+                self._preallocate_raw_data_array()
+                return -1, -1
+
             if data_start_ts < start_time_overlap:
                 # Cut the data if it starts before the start time overlap
                 packet_data = packet_data[:, int(round(start_time_overlap - data_start_ts, 1) * RAW_SPS) :]
@@ -371,10 +392,21 @@ class Downsampler:
         """
         log.info("Starting downsampling process")
         raw_files_list = self._list_raw_files()
+        if not raw_files_list:
+            log.warning("No raw files found")
+            return
+        # Read first file to number of traces
+        first_file = raw_files_list[-1]
+        first_file_path = os.path.join(RAW_DATA_PATH, first_file[0], first_file[1])
+        self.num_channels = self._load_segy_data(first_file_path).shape[0]
+        self._preallocate_raw_data_array()
+
         while raw_files_list:
+            log.info(f"Processing {len(raw_files_list)} files")
+            log.info(raw_files_list)
             start_time_overlap, end_time_overlap = self._load_chuck_raw_data(raw_files_list)
             if start_time_overlap == -1 and end_time_overlap == -1:
-                log.warning(f"Data is missing")
+                log.warning(f"Problem with a chunk, skipping downsampling")
                 continue
             down_data = self._downsample_raw_data()
             self._validate_downsampled_data(down_data)

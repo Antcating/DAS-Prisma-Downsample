@@ -10,7 +10,6 @@ TMP_PATH = config.get("PATHS", "TMP_PATH")
 
 # DAS system parameters
 PACKET_SIZE = int(config.get("SYSTEM", "PACKET_SIZE"))
-NUM_CHANNELS = int(config.get("SYSTEM", "RAW_NUM_CHANNELS"))
 RAW_SPS = float(config.get("SYSTEM", "RAW_SPS"))
 RAW_DX = float(config.get("SYSTEM", "RAW_DX"))
 
