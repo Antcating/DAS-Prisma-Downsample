@@ -56,7 +56,7 @@ class Downsampler:
 
         self.num_channels = None
         self.raw_data_array: np.ndarray = None
-        self.last_processed_file, self.last_file_offset = self._read_last_file_status()
+        self.last_processed_file, self.last_file_offset = None, None
 
         self.time_delay_threshold = 0.05
         self.version = "1.0.0"
@@ -419,6 +419,9 @@ class Downsampler:
         Run the downsampling process.
         """
         log.info("Starting downsampling process")
+        # Load the last processed file and offset
+        self.last_processed_file, self.last_file_offset = self._read_last_file_status()
+        # Fetch the list of raw files to be processed
         raw_files_list = self._list_raw_files()
         if not raw_files_list:
             log.warning("No raw files found")
