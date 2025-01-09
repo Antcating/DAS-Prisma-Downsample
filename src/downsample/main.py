@@ -91,7 +91,7 @@ class Downsampler:
         numpy.ndarray
             The preallocated raw data array.
         """
-        self.raw_data_array = np.zeros((self.num_channels, int(self.raw_sps * self.chunk_size + 2 * self.raw_sps * self.chunk_overlap)))
+        self.raw_data_array = np.zeros((self.num_channels, int(self.raw_sps * self.chunk_size + 2 * self.raw_sps * self.chunk_overlap)), dtype=np.float32)
     
     def _read_last_file_status(self):
         """
@@ -231,11 +231,10 @@ class Downsampler:
                 # To avoid this, we switched to scipy.signal.decimate function. 
                 # But as it turned out, it is too slow to run in real-time, 
                 # so I have rewritten it to use multithreading and also we decided to do downsampling in two steps:
-                # 1. Fast but noisy mean downsampling by factor 3 in time.
-                # 2. Slow but clean decimate downsampling by factor 5 in time.
+                # 1. Decimate downsampling by factor 3 in time.
+                # 2. Decimate downsampling by factor 5 in time.
                 # This way we avoid aliasing and keep the system real-time.
-                arr = arr.reshape(arr.shape[0], int((self.chunk_size + (2 * self.chunk_overlap)) * self.raw_sps / factors[0]), factors[0])
-                arr = multithreaded_mean(arr, axis=2, num_thread=self.num_threads)
+                arr = decimate(arr, factors[0], axis=1, num_thread=self.num_threads)
                 return decimate(arr, factors[1], axis=1, num_thread=self.num_threads)
         elif type == "mean":
             if factors != []:
